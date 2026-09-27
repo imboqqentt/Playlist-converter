@@ -2,8 +2,8 @@ import pytest
 
 from playlist_converter import cli
 from playlist_converter.models import MatchStatus, Track
-from playlist_converter.spotify_source import LIKED, SpotifySource, parse_playlist_ref, parse_track
-from playlist_converter.ytmusic_target import YTMusicTarget
+from playlist_converter.spotify_service import LIKED, SpotifySource, parse_playlist_ref, parse_track
+from playlist_converter.ytmusic_service import YTMusicTarget
 
 PID = "37i9dQZF1DXcBWIGoYBM5M"
 
@@ -105,7 +105,7 @@ def test_find_stops_after_good_isrc_match():
     fake = FakeYTMusic({("ISRC1", "songs"): [yt_result("v1", "Song", "Artist", 200)]})
     result = YTMusicTarget(fake).find(track)
     assert result.status is MatchStatus.MATCHED
-    assert result.candidate.video_id == "v1"
+    assert result.candidate.id == "v1"
     assert fake.searches == [("ISRC1", "songs")]
 
 
@@ -115,14 +115,14 @@ def test_find_falls_back_to_videos_and_reports_not_found():
         {("Artist Song", "videos"): [yt_result("v2", "Artist - Song (Official Video)", "Artist VEVO", 205, "video")]}
     )
     target = YTMusicTarget(fake)
-    assert target.find(track).candidate.video_id == "v2"
+    assert target.find(track).candidate.id == "v2"
     assert target.find(Track("Nothing", ("Nobody",), 100)).status is MatchStatus.NOT_FOUND
 
 
 def test_add_videos_dedupes_and_batches():
     fake = FakeYTMusic({})
     ids = [f"v{i}" for i in range(120)] + ["v0"]
-    YTMusicTarget(fake).add_videos("PL", ids)
+    YTMusicTarget(fake).add_items("PL", ids)
     assert [len(batch) for _, batch in fake.added] == [50, 50, 20]
 
 

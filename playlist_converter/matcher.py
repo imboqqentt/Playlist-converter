@@ -51,7 +51,14 @@ _SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _REMASTER_PAREN_RE = re.compile(r"[\(\[][^\)\]]*remaster[^\)\]]*[\)\]]", re.IGNORECASE)
+# Adornos típicos de títulos de YouTube: "(Official Video)", "[Letra]", "(Audio HD)"...
+_VIDEO_NOISE_RE = re.compile(
+    r"[\(\[][^\)\]]*\b(official|oficial|video|v[ií]deo|audio|lyrics?|letra|visualizer|"
+    r"visualiser|hd|hq|4k|mv|clip)\b[^\)\]]*[\)\]]",
+    re.IGNORECASE,
+)
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+_ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&|\s[xX]\s|\bfeat\.?\s|\bft\.?\s)\s*")
 
 
 def strip_accents(text: str) -> str:
@@ -69,8 +76,27 @@ def clean_title(title: str) -> str:
     """Quita adornos típicos de Spotify: '(feat. X)', '- Remastered 2011', etc."""
     title = _FEAT_RE.sub("", title)
     title = _REMASTER_PAREN_RE.sub("", title)
+    title = _VIDEO_NOISE_RE.sub("", title)
     title = _SUFFIX_RE.sub("", title)
-    return title.strip()
+    return re.sub(r"\s{2,}", " ", title).strip()
+
+
+def split_artists(text: str) -> tuple[str, ...]:
+    """'KAROL G, Nicki Minaj' o 'Don Omar & Daddy Yankee' → artistas por separado."""
+    return tuple(a for a in (p.strip() for p in _ARTIST_SPLIT_RE.split(text)) if a)
+
+
+def swapped(track: Track) -> Track | None:
+    """La misma canción con artista y título invertidos (algunos videos son "Canción - Artista")."""
+    if not track.artists:
+        return None
+    return Track(
+        title=track.primary_artist,
+        artists=split_artists(clean_title(track.title)),
+        duration_seconds=track.duration_seconds,
+        album=track.album,
+        source_id=track.source_id,
+    )
 
 
 def build_query(track: Track) -> str:

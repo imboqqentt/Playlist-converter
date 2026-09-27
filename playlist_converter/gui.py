@@ -12,11 +12,20 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
-from . import accounts, config, report
-from .converter import ConvertOptions, ConvertOutcome, convert
+from . import accounts, config, links, report, services
+from .converter import ConvertOptions, ConvertOutcome, SyncOutcome, convert, link_from_outcome, sync
+from .links import SyncLink
 from .models import MatchResult, MatchStatus
-from .spotify_source import DEFAULT_REDIRECT_URI, LIKED, SpotifySource, parse_playlist_ref
-from .ytmusic_target import YTMusicTarget
+from .refs import (
+    SERVICE_NAMES,
+    SPOTIFY,
+    YTMUSIC,
+    PlaylistRef,
+    liked_ref,
+    other_service,
+    parse_ref,
+)
+from .spotify_service import DEFAULT_REDIRECT_URI
 
 APP_TITLE = "Playlist Converter"
 ICON_PATH = Path(__file__).parent / "assets" / "icon_256.png"
@@ -28,12 +37,18 @@ STATUS_LABELS = {
     MatchStatus.LOW_CONFIDENCE: "?  Dudosa",
     MatchStatus.NOT_FOUND: "✘  No encontrada",
 }
-STATUS_COLORS = {  # (tema claro, tema oscuro)
-    MatchStatus.MATCHED: ("#1b7f3b", "#6fdc8c"),
-    MatchStatus.LOW_CONFIDENCE: ("#9a6700", "#f1c21b"),
-    MatchStatus.NOT_FOUND: ("#c4262e", "#ff8389"),
+REMOVED_LABEL = "−  Quitada"
+STATUS_COLORS = {  # tag: (tema claro, tema oscuro)
+    MatchStatus.MATCHED.name: ("#1b7f3b", "#6fdc8c"),
+    MatchStatus.LOW_CONFIDENCE.name: ("#9a6700", "#f1c21b"),
+    MatchStatus.NOT_FOUND.name: ("#c4262e", "#ff8389"),
+    "REMOVED": ("#6f6f6f", "#a8a8a8"),
 }
 PRIVACY_OPTIONS = (("Privada", "PRIVATE"), ("No listada", "UNLISTED"), ("Pública", "PUBLIC"))
+DIRECTIONS = (
+    (SPOTIFY, "Spotify  →  YouTube Music"),
+    (YTMUSIC, "YouTube Music  →  Spotify"),
+)
 
 HEADERS_STEPS = (
     "1.  Abre YouTube Music en Firefox con la cuenta que quieres agregar\n"
@@ -45,15 +60,7 @@ HEADERS_STEPS = (
 )
 
 SpotifyFactory = Callable[[], object]
-YTMusicFactory = Callable[[str], object]
-
-
-def default_spotify_factory():
-    return SpotifySource.from_env()
-
-
-def default_ytmusic_factory(auth_path: str):
-    return YTMusicTarget.from_auth_file(auth_path)
+YTMusicFactory = Callable[[str | None], object]
 
 
 def friendly_error(exc: BaseException) -> str:
@@ -121,8 +128,8 @@ class PlaceholderEntry(ttk.Entry):
 class App(tk.Tk):
     def __init__(
         self,
-        spotify_factory: SpotifyFactory = default_spotify_factory,
-        ytmusic_factory: YTMusicFactory = default_ytmusic_factory,
+        spotify_factory: SpotifyFactory | None = None,
+        ytmusic_factory: YTMusicFactory | None = None,
     ):
         super().__init__()
         self.spotify_factory = spotify_factory
@@ -133,14 +140,17 @@ class App(tk.Tk):
         self.worker: threading.Thread | None = None
         self.results: list[MatchResult] = []
         self.outcome: ConvertOutcome | None = None
+        self.last_url: str | None = None
         self.result_urls: dict[str, str] = {}
 
         self.title(APP_TITLE)
         self._set_icon()
-        self.geometry("980x760")
-        self.minsize(820, 640)
+        self.geometry("1020x880")
+        self.minsize(880, 740)
         self._build()
         self.refresh_accounts()
+        self.refresh_links()
+        self._apply_direction()
         config.load_env()
         self.after(100, self._poll_events)
 
@@ -153,80 +163,155 @@ class App(tk.Tk):
             pass
 
     def _build(self) -> None:
-        root = ttk.Frame(self, padding=(20, 16))
+        root = ttk.Frame(self, padding=(20, 14))
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(4, weight=1)
+        root.rowconfigure(2, weight=1)
 
         header = ttk.Frame(root)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        ttk.Label(header, text="Spotify → YouTube Music", font=("Segoe UI", 18, "bold")).pack(side="left")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(header, text="Spotify ⇄ YouTube Music", font=("Segoe UI", 18, "bold")).pack(side="left")
         ttk.Button(header, text="Ajustes de Spotify…", command=self.open_spotify_settings).pack(side="right")
 
-        # 1. Playlist
-        source = ttk.LabelFrame(root, text="  1. Playlist de Spotify  ", padding=12)
-        source.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        source.columnconfigure(0, weight=1)
-        self.link_entry = PlaceholderEntry(source, "Pega aquí el link de la playlist (Compartir → Copiar enlace)")
-        self.link_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(source, text="Pegar", command=self.paste_link).grid(row=0, column=1)
-        self.liked_var = tk.BooleanVar()
-        ttk.Checkbutton(
-            source,
-            text="Usar mis canciones guardadas («Me gusta») en vez de un link",
-            variable=self.liked_var,
-            command=self._toggle_liked,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.tabs = ttk.Notebook(root)
+        self.tabs.grid(row=1, column=0, sticky="ew")
+        convert_tab = ttk.Frame(self.tabs, padding=(12, 10))
+        sync_tab = ttk.Frame(self.tabs, padding=(12, 10))
+        self.tabs.add(convert_tab, text="  Convertir  ")
+        self.tabs.add(sync_tab, text="  Sincronizadas  ")
+        self._build_convert_tab(convert_tab)
+        self._build_sync_tab(sync_tab)
+        self._build_results(root)
 
-        # 2. Cuenta
-        target = ttk.LabelFrame(root, text="  2. Cuenta de YouTube Music  ", padding=12)
-        target.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+    def _build_convert_tab(self, tab: ttk.Frame) -> None:
+        tab.columnconfigure(0, weight=1)
+
+        direction = ttk.Frame(tab)
+        direction.grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(direction, text="Dirección:").pack(side="left", padx=(0, 10))
+        self.direction_var = tk.StringVar(value=SPOTIFY)
+        for value, label in DIRECTIONS:
+            ttk.Radiobutton(
+                direction, text=label, value=value, variable=self.direction_var, command=self._apply_direction
+            ).pack(side="left", padx=(0, 18))
+
+        self.source_frame = ttk.LabelFrame(tab, text="  1. Playlist de origen  ", padding=10)
+        self.source_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self.source_frame.columnconfigure(0, weight=1)
+        self.link_entry = PlaceholderEntry(self.source_frame, "Pega aquí el link de la playlist")
+        self.link_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.link_entry.bind("<KeyRelease>", lambda _e: self._detect_direction(), add="+")
+        self.link_entry.bind("<FocusOut>", lambda _e: self._detect_direction(), add="+")
+        ttk.Button(self.source_frame, text="Pegar", command=self.paste_link).grid(row=0, column=1)
+        self.liked_var = tk.BooleanVar()
+        self.liked_check = ttk.Checkbutton(
+            self.source_frame, variable=self.liked_var, command=self._toggle_liked
+        )
+        self.liked_check.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        target = ttk.LabelFrame(tab, text="  2. Cuenta de YouTube Music  ", padding=10)
+        target.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         target.columnconfigure(0, weight=1)
         self.account_var = tk.StringVar()
         self.account_combo = ttk.Combobox(target, textvariable=self.account_var, state="readonly")
         self.account_combo.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         ttk.Button(target, text="Agregar cuenta…", command=self.open_add_account).grid(row=0, column=1, padx=(0, 8))
         ttk.Button(target, text="Eliminar", command=self.remove_account).grid(row=0, column=2)
+        self.account_hint = ttk.Label(target, foreground="gray")
+        self.account_hint.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
-        # 3. Opciones
-        opts = ttk.LabelFrame(root, text="  3. Opciones  ", padding=12)
-        opts.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        opts = ttk.LabelFrame(tab, text="  3. Opciones  ", padding=10)
+        opts.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         opts.columnconfigure(1, weight=1)
         ttk.Label(opts, text="Nombre:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.name_entry = PlaceholderEntry(opts, "Igual que en Spotify")
-        self.name_entry.grid(row=0, column=1, columnspan=4, sticky="ew")
+        self.name_entry = PlaceholderEntry(opts, "Igual que en el origen")
+        self.name_entry.grid(row=0, column=1, sticky="ew")
         ttk.Label(opts, text="Privacidad:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
         self.privacy_var = tk.StringVar(value="PRIVATE")
         privacy_row = ttk.Frame(opts)
-        privacy_row.grid(row=1, column=1, columnspan=4, sticky="w", pady=(8, 0))
+        privacy_row.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        self.privacy_buttons: dict[str, ttk.Radiobutton] = {}
         for label, value in PRIVACY_OPTIONS:
-            ttk.Radiobutton(privacy_row, text=label, value=value, variable=self.privacy_var).pack(
-                side="left", padx=(0, 16)
-            )
+            button = ttk.Radiobutton(privacy_row, text=label, value=value, variable=self.privacy_var)
+            button.pack(side="left", padx=(0, 16))
+            self.privacy_buttons[value] = button
         self.dry_run_var = tk.BooleanVar()
         self.strict_var = tk.BooleanVar()
         checks = ttk.Frame(opts)
-        checks.grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 0))
+        checks.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Checkbutton(checks, text="Solo probar (no crea la playlist)", variable=self.dry_run_var).pack(
             side="left", padx=(0, 24)
         )
         ttk.Checkbutton(checks, text="No agregar coincidencias dudosas", variable=self.strict_var).pack(side="left")
 
-        # Resultados
+        self.convert_btn = ttk.Button(tab, text="Convertir", style="Accent.TButton", command=self.start)
+        self.convert_btn.grid(row=4, column=0, sticky="w", ipadx=16)
+
+    def _build_sync_tab(self, tab: ttk.Frame) -> None:
+        tab.columnconfigure(0, weight=1)
+        ttk.Label(
+            tab,
+            text=(
+                "Las playlists que conviertes quedan aquí. «Actualizar» agrega al destino solo las "
+                "canciones nuevas del origen, sin duplicar."
+            ),
+            wraplength=900,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        table = ttk.Frame(tab)
+        table.grid(row=1, column=0, sticky="ew")
+        table.columnconfigure(0, weight=1)
+        columns = ("origen", "destino", "cuenta", "canciones", "actualizada")
+        self.links_tree = ttk.Treeview(table, columns=columns, show="headings", selectmode="extended", height=8)
+        for col, title, width, stretch in (
+            ("origen", "Origen", 300, True),
+            ("destino", "Destino", 300, True),
+            ("cuenta", "Cuenta YT Music", 130, False),
+            ("canciones", "Canciones", 80, False),
+            ("actualizada", "Actualizada", 150, False),
+        ):
+            self.links_tree.heading(col, text=title)
+            self.links_tree.column(col, width=width, stretch=stretch, anchor="w" if stretch else "center")
+        scroll = ttk.Scrollbar(table, orient="vertical", command=self.links_tree.yview)
+        self.links_tree.configure(yscrollcommand=scroll.set)
+        self.links_tree.grid(row=0, column=0, sticky="ew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.links_tree.bind("<Double-1>", lambda _e: self.open_link_target())
+
+        buttons = ttk.Frame(tab)
+        buttons.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.update_btn = ttk.Button(
+            buttons, text="Actualizar seleccionadas", style="Accent.TButton", command=self.update_selected
+        )
+        self.update_btn.pack(side="left", padx=(0, 8))
+        self.update_all_btn = ttk.Button(buttons, text="Actualizar todas", command=self.update_all)
+        self.update_all_btn.pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="Vincular existente…", command=self.open_link_dialog).pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="Dejar de sincronizar", command=self.unlink_selected).pack(side="right")
+        ttk.Button(buttons, text="Abrir destino", command=self.open_link_target).pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="Abrir origen", command=self.open_link_source).pack(side="right", padx=(0, 8))
+
+        self.remove_missing_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            tab,
+            text="Quitar también del destino las canciones que borré del origen",
+            variable=self.remove_missing_var,
+        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+    def _build_results(self, root: ttk.Frame) -> None:
         results = ttk.Frame(root)
-        results.grid(row=4, column=0, sticky="nsew")
+        results.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
         results.columnconfigure(0, weight=1)
         results.rowconfigure(2, weight=1)
 
         actions = ttk.Frame(results)
-        actions.grid(row=0, column=0, sticky="ew", pady=(4, 8))
-        actions.columnconfigure(2, weight=1)
-        self.convert_btn = ttk.Button(actions, text="Convertir", style="Accent.TButton", command=self.start)
-        self.convert_btn.grid(row=0, column=0, padx=(0, 8), ipadx=16)
-        self.cancel_btn = ttk.Button(actions, text="Cancelar", command=self.cancel, state="disabled")
-        self.cancel_btn.grid(row=0, column=1, padx=(0, 12))
+        actions.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        actions.columnconfigure(0, weight=1)
         self.status_var = tk.StringVar(value="Listo.")
-        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=2, sticky="w")
+        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
+        self.cancel_btn = ttk.Button(actions, text="Cancelar", command=self.cancel, state="disabled")
+        self.cancel_btn.grid(row=0, column=1)
 
         self.progress = ttk.Progressbar(results, mode="determinate")
         self.progress.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -235,18 +320,19 @@ class App(tk.Tk):
         table.grid(row=2, column=0, sticky="nsew")
         table.columnconfigure(0, weight=1)
         table.rowconfigure(0, weight=1)
-        columns = ("estado", "spotify", "youtube", "puntaje")
+        columns = ("estado", "origen", "destino", "puntaje")
         self.tree = ttk.Treeview(table, columns=columns, show="headings", selectmode="browse")
         for col, title, width, stretch in (
             ("estado", "Estado", 130, False),
-            ("spotify", "Canción en Spotify", 320, True),
-            ("youtube", "Resultado en YouTube Music", 320, True),
+            ("origen", "Canción en el origen", 320, True),
+            ("destino", "Resultado en el destino", 320, True),
             ("puntaje", "Puntaje", 70, False),
         ):
             self.tree.heading(col, text=title)
             self.tree.column(col, width=width, stretch=stretch, anchor="center" if col == "puntaje" else "w")
-        for status, (light, dark) in STATUS_COLORS.items():
-            self.tree.tag_configure(status.name, foreground=dark if self.dark else light)
+        for tag, (light, dark) in STATUS_COLORS.items():
+            self.tree.tag_configure(tag, foreground=dark if self.dark else light)
+        self.tree.tag_configure("HEADER", font=("Segoe UI", 9, "bold"))
         scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -256,7 +342,7 @@ class App(tk.Tk):
         footer = ttk.Frame(results)
         footer.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         footer.columnconfigure(0, weight=1)
-        self.summary_var = tk.StringVar(value="Doble clic en una canción para abrirla en YouTube Music.")
+        self.summary_var = tk.StringVar(value="Doble clic en una canción para abrirla.")
         ttk.Label(footer, textvariable=self.summary_var).grid(row=0, column=0, sticky="w")
         self.report_btn = ttk.Button(footer, text="Guardar reporte…", command=self.save_report, state="disabled")
         self.report_btn.grid(row=0, column=1, padx=(8, 0))
@@ -265,7 +351,45 @@ class App(tk.Tk):
         )
         self.open_btn.grid(row=0, column=2, padx=(8, 0))
 
-    # ------------------------------------------------------------ acciones
+    # ------------------------------------------------------ pestaña Convertir
+    @property
+    def source_service(self) -> str:
+        return self.direction_var.get()
+
+    @property
+    def target_service(self) -> str:
+        return other_service(self.source_service)
+
+    def _apply_direction(self) -> None:
+        src, dst = SERVICE_NAMES[self.source_service], SERVICE_NAMES[self.target_service]
+        self.source_frame.configure(text=f"  1. Playlist de {src}  ")
+        self.liked_check.configure(text=f"Usar mis canciones guardadas («Me gusta») de {src} en vez de un link")
+        if self.target_service == YTMUSIC:
+            self.account_hint.configure(text="Aquí se creará la playlist.")
+        else:
+            self.account_hint.configure(
+                text="Se usa para leer la playlist (opcional si es pública). La playlist se creará en tu Spotify."
+            )
+        # Spotify no tiene playlists "no listadas".
+        unlisted = self.privacy_buttons["UNLISTED"]
+        if self.target_service == SPOTIFY:
+            unlisted.configure(state="disabled")
+            if self.privacy_var.get() == "UNLISTED":
+                self.privacy_var.set("PRIVATE")
+        else:
+            unlisted.configure(state="normal")
+        self.convert_btn.configure(text=f"Convertir a {dst}")
+
+    def _detect_direction(self) -> None:
+        """Si el link es de un servicio, elige la dirección automáticamente."""
+        try:
+            ref = parse_ref(self.link_entry.value())
+        except ValueError:
+            return
+        if not ref.is_liked and ref.service != self.direction_var.get():
+            self.direction_var.set(ref.service)
+            self._apply_direction()
+
     def refresh_accounts(self, select: str | None = None) -> None:
         names = accounts.list_accounts()
         self.account_combo["values"] = names
@@ -278,7 +402,8 @@ class App(tk.Tk):
         try:
             self.link_entry.set_value(self.clipboard_get().strip())
         except tk.TclError:
-            pass
+            return
+        self._detect_direction()
 
     def _toggle_liked(self) -> None:
         self.link_entry.configure(state="disabled" if self.liked_var.get() else "normal")
@@ -299,79 +424,253 @@ class App(tk.Tk):
         self.wait_window(dialog)
         return dialog.saved
 
-    def validate(self) -> tuple[str, str] | None:
-        """Devuelve (playlist_id, archivo de la cuenta) o muestra qué falta."""
+    def ensure_spotify(self) -> bool:
+        config.load_env()
+        return not config.missing_vars() or self.open_spotify_settings()
+
+    def _auth_for(self, account: str | None, required: bool) -> str | None | bool:
+        """Ruta de la cuenta; None si no hace falta; False si falta y el usuario debe agregarla."""
+        if account:
+            return str(accounts.account_path(account))
+        if not required:
+            return None
+        if messagebox.askyesno(
+            APP_TITLE, "Necesitas una cuenta de YouTube Music para esto.\n¿Agregar una ahora?", parent=self
+        ):
+            self.open_add_account()
+        return False
+
+    def validate(self) -> tuple[PlaylistRef, str | None] | None:
+        """Devuelve (playlist de origen, archivo de la cuenta) o muestra qué falta."""
         if self.liked_var.get():
-            playlist_id = LIKED
+            ref = liked_ref(self.source_service)
         else:
             try:
-                playlist_id = parse_playlist_ref(self.link_entry.value())
+                ref = parse_ref(self.link_entry.value())
             except ValueError:
                 messagebox.showwarning(
-                    APP_TITLE, "Pega el link de una playlist de Spotify.\n(En Spotify: ⋯ → Compartir → Copiar enlace)",
+                    APP_TITLE,
+                    f"Pega el link de una playlist de {SERVICE_NAMES[self.source_service]}.\n"
+                    "(En la app: ⋯ → Compartir → Copiar enlace)",
                     parent=self,
                 )
                 return None
-        account = self.account_var.get()
-        if not account:
-            if messagebox.askyesno(
-                APP_TITLE, "Todavía no agregas ninguna cuenta de YouTube Music.\n¿Agregar una ahora?", parent=self
-            ):
-                self.open_add_account()
+            if ref.service != self.source_service:
+                self.direction_var.set(ref.service)
+                self._apply_direction()
+        needs_account = self.target_service == YTMUSIC or ref.is_liked
+        auth = self._auth_for(self.account_var.get() or None, needs_account)
+        if auth is False:
             return None
-        config.load_env()
-        if config.missing_vars() and not self.open_spotify_settings():
+        if not self.ensure_spotify():
             return None
-        return playlist_id, str(accounts.account_path(account))
+        return ref, auth
 
     def start(self) -> None:
-        if self.worker and self.worker.is_alive():
+        if self.busy:
             return
         checked = self.validate()
         if not checked:
             return
-        playlist_id, auth_path = checked
+        ref, auth_path = checked
         options = ConvertOptions(
             name=self.name_entry.value() or None,
             privacy=self.privacy_var.get(),
             strict=self.strict_var.get(),
             dry_run=self.dry_run_var.get(),
         )
+        account = self.account_var.get() or None
+        self._begin("Conectando… (la primera vez se abre el navegador para autorizar Spotify)")
+        self._run(self._convert_job, ref, auth_path, account, options)
+
+    def _services(self, source_service: str, target_service: str, auth_path: str | None):
+        make = lambda service: services.build(  # noqa: E731
+            service, auth_path, self.spotify_factory, self.ytmusic_factory
+        )
+        return make(source_service), make(target_service)
+
+    def _convert_job(self, post, cancel, ref: PlaylistRef, auth_path, account, options: ConvertOptions) -> None:
+        source, target = self._services(ref.service, other_service(ref.service), auth_path)
+        outcome = convert(
+            source,
+            target,
+            ref.id,
+            options,
+            on_start=lambda name, total: post(("start", name, total)),
+            on_result=lambda i, total, result: post(("result", i, total, result)),
+            on_status=lambda message: post(("status", message)),
+            cancel=cancel,
+        )
+        if outcome.playlist_id and not outcome.cancelled:
+            links.upsert(
+                link_from_outcome(
+                    outcome, ref.service, ref.id, source.playlist_name(ref.id), account, options.strict
+                )
+            )
+        post(("done", outcome))
+
+    # -------------------------------------------------- pestaña Sincronizadas
+    def refresh_links(self) -> None:
+        selected = set(self.links_tree.selection())
+        self.links_tree.delete(*self.links_tree.get_children())
+        for link in links.load():
+            self.links_tree.insert(
+                "",
+                "end",
+                iid=link.id,
+                values=(
+                    f"{link.source_name}  ·  {SERVICE_NAMES[link.source_service]}",
+                    f"{link.target_name}  ·  {SERVICE_NAMES[link.target_service]}",
+                    link.account or "—",
+                    link.track_count,
+                    link.last_sync or "nunca",
+                ),
+            )
+        keep = [i for i in selected if self.links_tree.exists(i)]
+        if keep:
+            self.links_tree.selection_set(keep)
+
+    def _selected_links(self) -> list[SyncLink]:
+        ids = set(self.links_tree.selection())
+        return [l for l in links.load() if l.id in ids]
+
+    def update_selected(self) -> None:
+        selected = self._selected_links()
+        if not selected:
+            messagebox.showinfo(APP_TITLE, "Selecciona una o más playlists de la lista.", parent=self)
+            return
+        self._start_sync(selected)
+
+    def update_all(self) -> None:
+        all_links = links.load()
+        if not all_links:
+            messagebox.showinfo(
+                APP_TITLE, "Todavía no hay playlists sincronizadas: se agregan solas al convertir una.", parent=self
+            )
+            return
+        self._start_sync(all_links)
+
+    def _start_sync(self, selected: list[SyncLink]) -> None:
+        if self.busy or not self.ensure_spotify():
+            return
+        self._begin("Actualizando…")
+        self._run(self._sync_job, [l.id for l in selected], self.remove_missing_var.get())
+
+    def _sync_job(self, post, cancel, link_ids: list[str], remove_missing: bool) -> None:
+        totals = {"added": 0, "removed": 0, "errors": 0, "done": 0}
+        for n, link_id in enumerate(link_ids, start=1):
+            if cancel.is_set():
+                break
+            link = links.get(link_id)
+            if link is None:
+                continue
+            post(("sync_header", link, n, len(link_ids)))
+            try:
+                needs_account = link.target_service == YTMUSIC or link.source_id == "LM"
+                auth_path = services.ytmusic_auth(link.account, required=needs_account)
+                source, target = self._services(link.source_service, link.target_service, auth_path)
+                outcome = sync(
+                    link,
+                    source,
+                    target,
+                    remove_missing=remove_missing,
+                    on_start=lambda name, total: post(("start", name, total)),
+                    on_result=lambda i, total, result: post(("result", i, total, result)),
+                    on_status=lambda message: post(("status", message)),
+                    cancel=cancel,
+                )
+                if not outcome.cancelled:
+                    links.upsert(link)
+                    totals["done"] += 1
+                totals["added"] += outcome.added
+                totals["removed"] += len(outcome.removed)
+                post(("synced", outcome))
+            except Exception as exc:  # una playlist con error no detiene las demás
+                totals["errors"] += 1
+                post(("sync_error", link, exc))
+        post(("sync_finished", totals, cancel.is_set()))
+
+    def open_link_dialog(self) -> None:
+        LinkDialog(self)
+
+    def link_existing(self, source_ref: PlaylistRef, target_ref: PlaylistRef, account: str | None, strict: bool) -> None:
+        """Crea el vínculo (buscando los nombres) y lo actualiza de inmediato."""
+        if self.busy or not self.ensure_spotify():
+            return
+        self._begin("Vinculando…")
+        self._run(self._link_job, source_ref, target_ref, account, strict)
+
+    def _link_job(self, post, cancel, source_ref: PlaylistRef, target_ref: PlaylistRef, account, strict) -> None:
+        auth_path = services.ytmusic_auth(account, required=True)
+        source, target = self._services(source_ref.service, target_ref.service, auth_path)
+        link = links.upsert(
+            SyncLink(
+                source_service=source_ref.service,
+                source_id=source_ref.id,
+                source_name=source.playlist_name(source_ref.id),
+                target_service=target_ref.service,
+                target_id=target_ref.id,
+                target_name=target.playlist_name(target_ref.id),
+                account=account,
+                strict=strict,
+            )
+        )
+        post(("links_changed",))
+        self._sync_job(post, cancel, [link.id], remove_missing=False)
+
+    def unlink_selected(self) -> None:
+        selected = self._selected_links()
+        if not selected:
+            return
+        names = "\n".join(f"• {l.target_name}" for l in selected)
+        if messagebox.askyesno(
+            APP_TITLE,
+            f"¿Dejar de sincronizar estas playlists?\n{names}\n\n(No se borra ninguna playlist.)",
+            parent=self,
+        ):
+            for link in selected:
+                links.remove(link.id)
+            self.refresh_links()
+
+    def open_link_source(self) -> None:
+        for link in self._selected_links()[:1]:
+            webbrowser.open(link.source_url)
+
+    def open_link_target(self) -> None:
+        for link in self._selected_links()[:1]:
+            webbrowser.open(link.target_url)
+
+    # ------------------------------------------------------ trabajo de fondo
+    @property
+    def busy(self) -> bool:
+        return bool(self.worker and self.worker.is_alive())
+
+    def _begin(self, status: str) -> None:
         self.tree.delete(*self.tree.get_children())
-        self.results, self.outcome, self.result_urls = [], None, {}
+        self.results, self.outcome, self.last_url, self.result_urls = [], None, None, {}
         self.progress.configure(value=0, maximum=1)
         self.summary_var.set("")
+        self.status_var.set(status)
         self._set_running(True)
-        self.status_var.set("Conectando con Spotify… (la primera vez se abre el navegador para autorizar)")
+
+    def _run(self, job: Callable, *args) -> None:
         self.cancel_event = threading.Event()
-        self.worker = threading.Thread(
-            target=self._work, args=(playlist_id, auth_path, options, self.cancel_event), daemon=True
-        )
+        post = self.events.put
+        cancel = self.cancel_event
+
+        def target() -> None:
+            try:
+                job(post, cancel, *args)
+            except BaseException as exc:  # noqa: BLE001 - todo error debe llegar a la ventana
+                post(("error", exc))
+
+        self.worker = threading.Thread(target=target, daemon=True)
         self.worker.start()
 
     def cancel(self) -> None:
         if self.cancel_event:
             self.cancel_event.set()
             self.status_var.set("Cancelando…")
-
-    def _work(self, playlist_id: str, auth_path: str, options: ConvertOptions, cancel: threading.Event) -> None:
-        post = self.events.put
-        try:
-            spotify = self.spotify_factory()
-            ytmusic = self.ytmusic_factory(auth_path)
-            outcome = convert(
-                spotify,
-                ytmusic,
-                playlist_id,
-                options,
-                on_start=lambda name, total: post(("start", name, total)),
-                on_result=lambda i, total, result: post(("result", i, total, result)),
-                on_status=lambda message: post(("status", message)),
-                cancel=cancel,
-            )
-            post(("done", outcome))
-        except BaseException as exc:  # noqa: BLE001 - todo error debe llegar a la ventana
-            post(("error", exc))
 
     def _poll_events(self) -> None:
         try:
@@ -388,7 +687,7 @@ class App(tk.Tk):
         elif kind == "start":
             _, name, total = event
             self.progress.configure(maximum=max(total, 1), value=0)
-            self.status_var.set(f"Buscando {total} canciones de «{name}»…")
+            self.status_var.set(f"Buscando {total} canciones de «{name}»…" if total else "No hay canciones nuevas.")
         elif kind == "result":
             _, i, total, result = event
             self._add_row(result)
@@ -396,8 +695,31 @@ class App(tk.Tk):
             self.status_var.set(f"Buscando canciones… {i} de {total}")
         elif kind == "done":
             self._finish(event[1])
+        elif kind == "links_changed":
+            self.refresh_links()
+        elif kind == "sync_header":
+            _, link, n, total = event
+            self.tree.insert("", "end", values=("", f"{n}/{total}  {link.describe()}", "", ""), tags=("HEADER",))
+        elif kind == "synced":
+            self._synced(event[1])
+        elif kind == "sync_error":
+            _, link, exc = event
+            self.tree.insert(
+                "", "end", values=("✘  Error", friendly_error(exc).splitlines()[0], "", ""), tags=("NOT_FOUND",)
+            )
+        elif kind == "sync_finished":
+            _, totals, cancelled = event
+            self._set_running(False)
+            self.refresh_links()
+            self.report_btn.configure(state="normal" if self.results else "disabled")
+            text = f"Agregadas: {totals['added']} · Quitadas: {totals['removed']}"
+            if totals["errors"]:
+                text += f" · Con error: {totals['errors']}"
+            self.summary_var.set(text)
+            self.status_var.set("Cancelado." if cancelled else f"¡Listo! {totals['done']} playlist(s) actualizadas.")
         elif kind == "error":
             self._set_running(False)
+            self.refresh_links()
             self.status_var.set("Ocurrió un error.")
             messagebox.showerror(APP_TITLE, friendly_error(event[1]), parent=self)
 
@@ -413,29 +735,44 @@ class App(tk.Tk):
             values=(STATUS_LABELS[result.status], result.track.display(), found, f"{result.score:.2f}"),
             tags=(result.status.name,),
         )
-        if c:
+        if c and c.url:
             self.result_urls[item] = c.url
         self.tree.see(item)
+
+    def _synced(self, outcome: SyncOutcome) -> None:
+        for name in outcome.removed:
+            self.tree.insert("", "end", values=(REMOVED_LABEL, name, "", ""), tags=("REMOVED",))
+        if not outcome.results and not outcome.removed:
+            self.tree.insert("", "end", values=("", "Sin cambios: ya estaba al día.", "", ""))
+        self.last_url = outcome.link.target_url
+        self.open_btn.configure(state="normal")
 
     def _finish(self, outcome: ConvertOutcome) -> None:
         self.outcome = outcome
         self._set_running(False)
+        self.refresh_links()
         self.report_btn.configure(state="normal" if outcome.results else "disabled")
         self.summary_var.set(report.summary(outcome.results) if outcome.results else "")
         if outcome.cancelled:
-            self.status_var.set("Cancelado. No se modificó YouTube Music.")
+            self.status_var.set("Cancelado. No se modificó nada.")
         elif not outcome.results:
             self.status_var.set("La playlist no tiene canciones.")
         elif outcome.playlist_id:
+            self.last_url = outcome.playlist_url
             self.open_btn.configure(state="normal")
-            self.status_var.set(f"¡Listo! {outcome.added} canciones agregadas a «{outcome.playlist_name}».")
+            self.status_var.set(
+                f"¡Listo! {outcome.added} canciones agregadas a «{outcome.playlist_name}» "
+                f"en {SERVICE_NAMES[outcome.target_service]}. Quedó en «Sincronizadas»."
+            )
         elif self.dry_run_var.get():
             self.status_var.set("Prueba terminada: no se creó ninguna playlist.")
         else:
             self.status_var.set("No se encontró ninguna canción para agregar.")
 
     def _set_running(self, running: bool) -> None:
-        self.convert_btn.configure(state="disabled" if running else "normal")
+        state = "disabled" if running else "normal"
+        for button in (self.convert_btn, self.update_btn, self.update_all_btn):
+            button.configure(state=state)
         self.cancel_btn.configure(state="normal" if running else "disabled")
         if running:
             self.open_btn.configure(state="disabled")
@@ -447,8 +784,8 @@ class App(tk.Tk):
             webbrowser.open(self.result_urls[selection[0]])
 
     def open_playlist(self) -> None:
-        if self.outcome and self.outcome.playlist_url:
-            webbrowser.open(self.outcome.playlist_url)
+        if self.last_url:
+            webbrowser.open(self.last_url)
 
     def save_report(self) -> None:
         if not self.results:
@@ -630,6 +967,76 @@ class AddAccountDialog(Dialog):
         self.app.refresh_accounts(select=name)
         self.destroy()
         messagebox.showinfo(APP_TITLE, f"Cuenta «{name}» guardada.", parent=self.app)
+
+
+class LinkDialog(Dialog):
+    """Vincula dos playlists que ya existen (una de cada servicio) para poder actualizarlas."""
+
+    def __init__(self, master: App):
+        super().__init__(master, "Vincular playlists existentes")
+        self.app = master
+        b = self.body
+        ttk.Label(b, text="Vincular playlists existentes", font=("Segoe UI", 14, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            b,
+            justify="left",
+            wraplength=560,
+            text=(
+                "Útil para playlists que convertiste antes o que armaste a mano. Al vincularlas se "
+                "agregan al destino las canciones del origen que le falten (sin duplicar)."
+            ),
+        ).grid(row=1, column=0, sticky="w", pady=(6, 10))
+
+        form = ttk.Frame(b)
+        form.grid(row=2, column=0, sticky="ew")
+        form.columnconfigure(1, weight=1)
+        ttk.Label(form, text="Origen:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.source_entry = PlaceholderEntry(form, "Link de la playlist que manda (Spotify o YouTube Music)", width=60)
+        self.source_entry.grid(row=0, column=1, sticky="ew")
+        ttk.Label(form, text="Destino:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        self.target_entry = PlaceholderEntry(form, "Link de la playlist que se actualiza (del otro servicio)", width=60)
+        self.target_entry.grid(row=1, column=1, sticky="ew", pady=(8, 0))
+        ttk.Label(form, text="Cuenta YT Music:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        self.account_var = tk.StringVar(value=master.account_var.get())
+        ttk.Combobox(
+            form, textvariable=self.account_var, values=accounts.list_accounts(), state="readonly"
+        ).grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        self.strict_var = tk.BooleanVar(value=master.strict_var.get())
+        ttk.Checkbutton(form, text="No agregar coincidencias dudosas", variable=self.strict_var).grid(
+            row=3, column=1, sticky="w", pady=(8, 0)
+        )
+
+        buttons = ttk.Frame(b)
+        buttons.grid(row=3, column=0, sticky="e", pady=(16, 0))
+        ttk.Button(buttons, text="Cancelar", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="Vincular y actualizar", style="Accent.TButton", command=self.save).pack(
+            side="right", padx=(0, 8)
+        )
+        self.show()
+
+    def save(self) -> None:
+        try:
+            source_ref = parse_ref(self.source_entry.value())
+            target_ref = parse_ref(self.target_entry.value(), liked_service=other_service(source_ref.service))
+        except ValueError as exc:
+            messagebox.showwarning(APP_TITLE, str(exc), parent=self)
+            return
+        if source_ref.service == target_ref.service:
+            messagebox.showwarning(
+                APP_TITLE, "El origen y el destino deben ser de servicios distintos.", parent=self
+            )
+            return
+        if target_ref.is_liked:
+            messagebox.showwarning(APP_TITLE, "El destino debe ser una playlist.", parent=self)
+            return
+        account = self.account_var.get() or None
+        if not account:
+            messagebox.showwarning(APP_TITLE, "Elige la cuenta de YouTube Music.", parent=self)
+            return
+        self.destroy()
+        self.app.link_existing(source_ref, target_ref, account, self.strict_var.get())
 
 
 def windows_prefers_dark() -> bool:

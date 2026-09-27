@@ -1,16 +1,19 @@
-# Playlist Converter: Spotify → YouTube Music
+# Playlist Converter: Spotify ⇄ YouTube Music
 
-Script de línea de comandos que lee una playlist de Spotify (o tus canciones
-guardadas), busca cada canción en YouTube Music y crea una playlist con las
-que encontró. Además genera un reporte CSV con las canciones dudosas o no
-encontradas para que las revises a mano.
+Convierte playlists **en ambas direcciones** (de Spotify a YouTube Music y de
+YouTube Music a Spotify) y las **mantiene sincronizadas**: cuando agregas canciones
+a la playlist original, un botón las lleva a la copia. Genera un reporte CSV con
+las canciones dudosas o no encontradas para que las revises a mano.
 
 - **Sin cuota diaria**: usa [`ytmusicapi`](https://github.com/sigma67/ytmusicapi)
   en vez de la API oficial de YouTube (que limita a unas 65 canciones al día).
 - **Búsqueda cuidadosa**: primero busca por ISRC (código único de la grabación)
   y después por "artista + título", y compara título, artista y duración. También
   descarta versiones en vivo, covers, karaoke, remixes, etc., salvo que la
-  canción original también lo sea.
+  canción original también lo sea. Limpia los títulos de videos de YouTube
+  ("Artista - Canción (Video Oficial)") antes de buscarlos en Spotify.
+- **Sincronización sin duplicados**: recuerda qué canción corresponde a cuál, así
+  al actualizar solo busca las nuevas y nunca agrega una que ya está.
 
 ## Opción fácil: la aplicación para Windows (sin instalar Python)
 
@@ -18,15 +21,27 @@ encontradas para que las revises a mano.
    (o, desde **Actions** → la última ejecución verde → *Artifacts* → `PlaylistConverter-windows`).
 2. Haz doble clic. Si Windows muestra "Windows protegió su PC", haz clic en
    **Más información → Ejecutar de todas formas** (el .exe no está firmado digitalmente).
-3. Se abre una ventana con tres pasos:
-   1. **Playlist de Spotify**: pega el link (o marca "Usar mis canciones guardadas").
-   2. **Cuenta de YouTube Music**: elige la cuenta o agrega una nueva con **Agregar cuenta…**.
-   3. **Opciones**: nombre, privacidad, "Solo probar" y "No agregar coincidencias dudosas".
+3. Se abre una ventana con dos pestañas:
+
+   **Convertir**
+   1. Elige la **dirección** (o simplemente pega el link: se detecta sola).
+   2. **Playlist de origen**: pega el link (o marca "Usar mis canciones guardadas").
+   3. **Cuenta de YouTube Music**: donde se crea la playlist (si el destino es YouTube
+      Music) o con la que se lee (opcional si la playlist de YouTube Music es pública).
+   4. **Opciones**: nombre, privacidad, "Solo probar" y "No agregar coincidencias dudosas".
 
    Presiona **Convertir** y verás cada canción aparecer en la tabla (✔ encontrada,
-   ? dudosa, ✘ no encontrada). Doble clic en una fila abre esa canción en YouTube Music.
+   ? dudosa, ✘ no encontrada). Doble clic en una fila abre esa canción.
    Al terminar, **Abrir playlist** la abre en el navegador y **Guardar reporte…**
    exporta el resultado a un CSV para Excel.
+
+   **Sincronizadas**
+   Cada playlist que conviertes queda en esta lista. Selecciona una o varias y presiona
+   **Actualizar seleccionadas** (o **Actualizar todas**): se buscan solo las canciones
+   nuevas del origen y se agregan al destino. Si marcas "Quitar también del destino las
+   canciones que borré del origen", la copia queda idéntica.
+   **Vincular existente…** sirve para playlists que convertiste antes o armaste a mano:
+   pegas el link de ambas y desde ahí se actualizan igual.
 
 La primera vez, la ventana te pide el Client ID y el Client Secret de Spotify
 (botón **Ajustes de Spotify…**, con instrucciones y un botón para copiar la Redirect URI).
@@ -120,6 +135,19 @@ Red). Pégalos y presiona Enter dos veces.
 # Ventana (lo mismo que el .exe)
 python -m playlist_converter
 
+# De YouTube Music a Spotify: la dirección se detecta según el link
+python -m playlist_converter convert "https://music.youtube.com/playlist?list=PL..."
+
+# Tus "Me gusta" de YouTube Music a Spotify
+python -m playlist_converter convert liked --from ytmusic
+
+# Playlists sincronizadas
+python -m playlist_converter synced                     # lista con sus IDs
+python -m playlist_converter update 3f9a1c2e            # actualiza una
+python -m playlist_converter update --all --remove-missing
+python -m playlist_converter link <link origen> <link destino>   # vincula dos existentes
+python -m playlist_converter unlink 3f9a1c2e            # deja de sincronizar (no borra nada)
+
 # Menú guiado en la terminal
 python -m playlist_converter menu
 
@@ -199,13 +227,16 @@ Estructura:
 playlist_converter/
   cli.py             # comandos y opciones
   gui.py             # ventana (la que abre el .exe)
-  converter.py       # proceso de conversión, compartido por la ventana y la terminal
+  converter.py       # conversión y sincronización, compartidas por la ventana y la terminal
+  links.py           # registro de playlists sincronizadas (sincronizadas.json)
+  refs.py            # reconoce links de Spotify y YouTube Music
+  services.py        # crea los servicios con sus credenciales
   interactive.py     # menú guiado en la terminal
   assets/            # ícono
   accounts.py        # cuentas de YouTube Music y carpeta de datos
   config.py          # credenciales de Spotify (.env)
-  spotify_source.py  # lectura de Spotify
-  ytmusic_target.py  # búsqueda y creación de playlists en YouTube Music
+  spotify_service.py # Spotify como origen y destino
+  ytmusic_service.py # YouTube Music como origen y destino
   matcher.py         # puntaje de coincidencias (lógica pura, sin red)
   report.py          # reporte CSV
   models.py          # Track, Candidate, MatchResult
@@ -229,3 +260,8 @@ pyinstaller --onefile --windowed --name PlaylistConverter --icon playlist_conver
   Top 50, etc.) desde apps nuevas. Solución: en Spotify, "Agregar a otra playlist"
   → crea una copia propia y convierte esa.
 - Los podcasts se omiten. Los archivos locales de Spotify se buscan solo por nombre (no tienen ISRC).
+- Al sincronizar, las canciones nuevas se agregan al final de la copia (no se replica el orden).
+- Si borras a mano una canción de la copia, la sincronización respeta tu decisión y no la vuelve a agregar.
+- Spotify no tiene playlists "no listadas": en esa dirección solo hay privada o pública.
+- La primera vez que conviertas hacia Spotify, se te pedirá autorizar de nuevo (se necesitan
+  permisos para crear playlists).

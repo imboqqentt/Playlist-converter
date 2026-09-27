@@ -44,7 +44,7 @@ def test_live_version_loses_against_studio_version():
     studio = cand("Bohemian Rhapsody", video_id="studio")
     live = cand("Bohemian Rhapsody (Live Aid 1985)", duration=360, video_id="live")
     best, _ = matcher.best_candidate(BOHEMIAN, [live, studio])
-    assert best.video_id == "studio"
+    assert best.id == "studio"
 
 
 def test_live_track_on_spotify_is_not_penalized():
@@ -84,7 +84,7 @@ def test_official_channel_beats_third_party_lyrics_upload():
     official = cand("Queen – Bohemian Rhapsody (Official Video Remastered)", artists=("Queen Official",),
                     duration=359, result_type="video", video_id="official")
     best, _ = matcher.best_candidate(BOHEMIAN, [lyrics, official])
-    assert best.video_id == "official"
+    assert best.id == "official"
 
 
 def test_cover_with_very_different_length_is_rejected():

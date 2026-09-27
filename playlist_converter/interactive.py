@@ -6,7 +6,7 @@ from typing import Callable
 
 from . import accounts
 from .cli import HEADERS_HELP, build_parser, cmd_convert
-from .spotify_source import parse_playlist_ref
+from .refs import parse_ref
 
 Ask = Callable[[str], str]
 
@@ -19,10 +19,11 @@ def run_menu(ask: Ask = input) -> int:
         names = accounts.list_accounts()
         print()
         print("Cuentas de YouTube Music: " + (", ".join(names) if names else "ninguna todavía"))
-        print("  1. Convertir una playlist de Spotify")
+        print("  1. Convertir una playlist (Spotify ⇄ YouTube Music)")
         print("  2. Agregar una cuenta de YouTube Music")
         print("  3. Eliminar una cuenta")
-        print("  4. Salir")
+        print("  4. Actualizar las playlists sincronizadas")
+        print("  5. Salir")
         try:
             choice = ask("Elige una opción: ").strip()
             if choice == "1":
@@ -31,7 +32,9 @@ def run_menu(ask: Ask = input) -> int:
                 add_account_flow(ask)
             elif choice == "3":
                 remove_account_flow(ask)
-            elif choice in ("4", "q", "salir"):
+            elif choice == "4":
+                update_flow(ask)
+            elif choice in ("5", "q", "salir"):
                 return 0
             else:
                 print("Opción no válida.")
@@ -103,9 +106,12 @@ def convert_flow(ask: Ask) -> None:
     if not account:
         return
 
-    link = ask("\nPega el link de la playlist de Spotify (o escribe 'liked' para tus favoritas): ").strip()
+    link = ask(
+        "\nPega el link de la playlist de Spotify o de YouTube Music\n"
+        "(o escribe 'liked' para tus favoritas de Spotify): "
+    ).strip()
     try:
-        parse_playlist_ref(link)
+        parse_ref(link)
     except ValueError as exc:
         print(exc)
         return
@@ -121,6 +127,20 @@ def convert_flow(ask: Ask) -> None:
 
     print()
     cmd_convert(build_parser().parse_args(argv))
+    ask("\nPresiona Enter para volver al menú...")
+
+
+def update_flow(ask: Ask) -> None:
+    import argparse
+
+    from . import links
+    from .cli import cmd_update
+
+    if not links.load():
+        print("No hay playlists sincronizadas todavía: se agregan solas al convertir una.")
+        return
+    remove = _yes(ask("¿Quitar del destino las canciones que ya no están en el origen? (s/N): "))
+    cmd_update(argparse.Namespace(ids=[], all=True, remove_missing=remove, delay=0.0))
     ask("\nPresiona Enter para volver al menú...")
 
 

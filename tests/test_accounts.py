@@ -1,7 +1,7 @@
 import pytest
 
 from playlist_converter import accounts, cli, interactive
-from playlist_converter.ytmusic_target import YTMusicTarget
+from playlist_converter.ytmusic_service import YTMusicTarget
 
 HEADERS = "cookie: SAPISID=abc; __Secure-3PAPISID=abc\nx-goog-authuser: 0\nuser-agent: Mozilla/5.0"
 
@@ -78,7 +78,7 @@ def scripted(answers):
 
 
 def test_menu_adds_account_then_exits():
-    ask = scripted(["2", "Mamá", *HEADERS.splitlines(), "", "4"])
+    ask = scripted(["2", "Mamá", *HEADERS.splitlines(), "", "5"])
     assert interactive.run_menu(ask) == 0
     assert accounts.list_accounts() == ["Mamá"]
 
@@ -90,7 +90,7 @@ def test_menu_convert_builds_expected_command(monkeypatch):
     monkeypatch.setattr(interactive, "cmd_convert", lambda args: seen.update(vars(args)) or 0)
 
     link = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
-    ask = scripted(["1", "2", link, "Viaje", "2", "s", "", "4"])
+    ask = scripted(["1", "2", link, "Viaje", "2", "s", "", "5"])
     assert interactive.run_menu(ask) == 0
     assert seen["account"] == "mama"
     assert seen["playlist"] == link
@@ -107,7 +107,7 @@ def test_menu_survives_errors(monkeypatch, capsys):
 
     monkeypatch.setattr(interactive, "cmd_convert", boom)
     link = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
-    ask = scripted(["1", link, "", "", "n", "4"])
+    ask = scripted(["1", link, "", "", "n", "5"])
     assert interactive.run_menu(ask) == 0
     assert "se cayó internet" in capsys.readouterr().out
 
@@ -124,7 +124,7 @@ def test_convert_uses_selected_account(tmp_path, monkeypatch):
         raise SystemExit(0)
 
     monkeypatch.setattr(YTMusicTarget, "from_auth_file", classmethod(fake_from_auth_file))
-    monkeypatch.setattr("playlist_converter.cli.SpotifySource.from_env", classmethod(lambda cls: None))
+    monkeypatch.setattr("playlist_converter.spotify_service.SpotifyService.from_env", classmethod(lambda cls: None))
     with pytest.raises(SystemExit):
         cli.main(["convert", "liked", "--account", "mama"])
     assert used["path"].endswith("mama.json")

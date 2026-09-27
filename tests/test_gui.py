@@ -1,3 +1,4 @@
+import gc
 import os
 import time
 
@@ -5,7 +6,7 @@ import pytest
 
 tk = pytest.importorskip("tkinter")
 
-from playlist_converter import accounts  # noqa: E402
+from playlist_converter import accounts, links  # noqa: E402
 from playlist_converter.models import Candidate, MatchResult, MatchStatus, Track  # noqa: E402
 
 HEADERS = "cookie: SAPISID=abc; __Secure-3PAPISID=abc\nx-goog-authuser: 0\nuser-agent: Mozilla/5.0"
@@ -21,6 +22,8 @@ def test_friendly_error_messages():
 
 
 class FakeSpotify:
+    service = "spotify"
+
     def __init__(self, n=3):
         self.n = n
 
@@ -33,6 +36,8 @@ class FakeSpotify:
 
 
 class FakeYT:
+    service = "ytmusic"
+
     def __init__(self, delay=0.0):
         self.delay = delay
         self.created = []
@@ -48,7 +53,7 @@ class FakeYT:
         self.created.append((name, privacy))
         return "PL1"
 
-    def add_videos(self, pid, ids):
+    def add_items(self, pid, ids):
         self.added.append((pid, ids))
 
 
@@ -77,6 +82,10 @@ def app_factory(monkeypatch):
     yield make
     for app in created:
         app.destroy()
+    # Liberar aquí (hilo principal) los objetos de Tk; si el recolector lo hace desde el hilo
+    # de trabajo de otro test, Tk se bloquea porque en los tests no corre mainloop().
+    created.clear()
+    gc.collect()
 
 
 def run_until_idle(app, timeout=10):
@@ -161,7 +170,7 @@ def test_liked_songs_skip_link(app_factory):
     accounts.save_account("daniel", HEADERS)
     app = app_factory()
     app.liked_var.set(True)
-    assert app.validate()[0] == "liked"
+    assert app.validate()[0].id == "liked"
 
 
 def test_add_account_dialog(app_factory):
@@ -195,3 +204,124 @@ def test_spotify_settings_dialog_saves_credentials(app_factory, isolated_app_dir
     assert dialog.saved
     assert os.environ["SPOTIPY_CLIENT_ID"] == "nuevo_id"
     assert "nuevo_secret" in (isolated_app_dir / ".env").read_text()
+
+
+# ------------------------------------------------------------ dirección y sincronización
+YT_LINK = "https://music.youtube.com/playlist?list=PLyt123"
+
+
+@pytest.fixture
+def two_way(app_factory):
+    """Ventana conectada a dos servicios falsos (Spotify y YouTube Music) en memoria."""
+    from fakes import FakeService, track
+
+    spotify = FakeService(
+        "spotify",
+        playlists={"37i9dQZF1DXcBWIGoYBM5M": [track("A"), track("B")]},
+        catalog={"Y1": "sp1", "Y2": "sp2"},
+        names={"37i9dQZF1DXcBWIGoYBM5M": "Lista Spotify"},
+    )
+    ytmusic = FakeService(
+        "ytmusic",
+        playlists={"PLyt123": [track("Y1"), track("Y2"), track("Y3")]},
+        catalog={"A": "yA", "B": "yB", "C": "yC"},
+        names={"PLyt123": "Lista YT"},
+    )
+    app = app_factory(spotify=spotify, yt=ytmusic)
+    return app, spotify, ytmusic
+
+
+def test_pasting_a_youtube_link_switches_direction(two_way):
+    app, _, _ = two_way
+    assert app.direction_var.get() == "spotify"
+    app.privacy_var.set("UNLISTED")
+    app.clipboard_clear()
+    app.clipboard_append(YT_LINK)
+    app.paste_link()
+    assert app.direction_var.get() == "ytmusic"
+    assert "Spotify" in app.convert_btn["text"]
+    assert str(app.privacy_buttons["UNLISTED"]["state"]) == "disabled"
+    assert app.privacy_var.get() == "PRIVATE"  # Spotify no tiene "no listada"
+
+
+def test_convert_youtube_to_spotify_in_window(two_way):
+    app, spotify, _ = two_way
+    app.link_entry.set_value(YT_LINK)
+    app._detect_direction()
+    app.start()  # sin cuentas: leer una playlist pública de YouTube Music no la requiere
+    run_until_idle(app)
+    assert spotify.created == [("Lista YT", "PRIVATE")]
+    assert spotify.playlist_item_ids("new1") == ["sp1", "sp2"]
+    assert "Spotify" in app.status_var.get()
+    assert len(app.links_tree.get_children()) == 1  # quedó en «Sincronizadas»
+
+
+def test_update_from_sync_tab(two_way):
+    from fakes import track
+
+    app, spotify, ytmusic = two_way
+    accounts.save_account("daniel", HEADERS)
+    app.refresh_accounts()
+    app.link_entry.set_value("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M")
+    app.start()
+    run_until_idle(app)
+    assert ytmusic.playlist_item_ids("new1") == ["yA", "yB"]
+
+    spotify.playlists["37i9dQZF1DXcBWIGoYBM5M"] = [track("A"), track("C")]
+    app.remove_missing_var.set(True)
+    app.links_tree.selection_set(app.links_tree.get_children()[0])
+    app.update_selected()
+    run_until_idle(app)
+    assert ytmusic.playlist_item_ids("new1") == ["yA", "yC"]
+    assert "Agregadas: 1 · Quitadas: 1" == app.summary_var.get()
+    labels = [app.tree.item(i, "values")[0] for i in app.tree.get_children()]
+    assert any("Quitada" in l for l in labels)
+    assert str(app.open_btn["state"]) == "normal"
+
+
+def test_update_all_reports_errors_per_playlist(two_way):
+    from playlist_converter.links import SyncLink
+
+    app, _, _ = two_way
+    links.upsert(SyncLink("spotify", "37i9dQZF1DXcBWIGoYBM5M", "Lista", "ytmusic", "PLx", "X", account="borrada"))
+    app.refresh_links()
+    app.update_all()
+    run_until_idle(app)
+    assert "Con error: 1" in app.summary_var.get()
+
+
+def test_link_dialog_links_and_updates(two_way):
+    from playlist_converter.gui import LinkDialog
+
+    app, spotify, _ = two_way
+    accounts.save_account("daniel", HEADERS)
+    app.refresh_accounts()
+    spotify.playlists["SPexisting000000000000"] = []
+    dialog = LinkDialog(app)
+    dialog.source_entry.set_value(YT_LINK)
+    dialog.target_entry.set_value("https://open.spotify.com/playlist/SPexisting000000000000")
+    dialog.save()
+    run_until_idle(app)
+    saved = links.load()
+    assert len(saved) == 1 and saved[0].account == "daniel"
+    assert spotify.playlist_item_ids("SPexisting000000000000") == ["sp1", "sp2"]
+
+    bad = LinkDialog(app)
+    bad.source_entry.set_value(YT_LINK)
+    bad.target_entry.set_value(YT_LINK)
+    bad.save()
+    assert app.dialogs[-1][0] == "showwarning"
+    bad.destroy()
+
+
+def test_unlink_keeps_playlists(two_way, monkeypatch):
+    from playlist_converter import gui
+    from playlist_converter.links import SyncLink
+
+    app, _, _ = two_way
+    link = links.upsert(SyncLink("spotify", "S", "Lista", "ytmusic", "PLx", "X"))
+    app.refresh_links()
+    app.links_tree.selection_set(link.id)
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **kw: True)
+    app.unlink_selected()
+    assert links.load() == [] and app.links_tree.get_children() == ()

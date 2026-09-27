@@ -12,13 +12,13 @@ COLUMNS = [
     "n",
     "estado",
     "puntaje",
-    "spotify_artistas",
-    "spotify_titulo",
-    "spotify_duracion",
-    "ytmusic_titulo",
-    "ytmusic_artistas",
-    "ytmusic_duracion",
-    "ytmusic_url",
+    "origen_artistas",
+    "origen_titulo",
+    "origen_duracion",
+    "destino_titulo",
+    "destino_artistas",
+    "destino_duracion",
+    "destino_url",
 ]
 
 
