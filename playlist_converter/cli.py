@@ -109,17 +109,22 @@ def cmd_convert(args: argparse.Namespace) -> int:
         return 2
 
     config.load_env_file()
-    missing = config.missing_vars()
-    if missing:
+    if config.missing_vars():
+        if not sys.stdin.isatty():
+            print(
+                f"Faltan tus credenciales de Spotify: {', '.join(config.missing_vars())}.\n"
+                f"Crea un archivo .env en {Path.cwd()} con estas dos líneas:\n"
+                "  SPOTIPY_CLIENT_ID=tu_client_id\n"
+                "  SPOTIPY_CLIENT_SECRET=tu_client_secret",
+                file=sys.stderr,
+            )
+            return 2
         print(
-            f"Faltan tus credenciales de Spotify: {', '.join(missing)}.\n"
-            "Crea un archivo llamado .env en esta carpeta con estas dos líneas:\n"
-            "  SPOTIPY_CLIENT_ID=tu_client_id\n"
-            "  SPOTIPY_CLIENT_SECRET=tu_client_secret\n"
-            "(Los encuentras en https://developer.spotify.com/dashboard > tu app > Settings)",
-            file=sys.stderr,
+            "Necesito las credenciales de tu app de Spotify (solo esta vez).\n"
+            "Están en https://developer.spotify.com/dashboard > tu app > Settings.\n"
         )
-        return 2
+        saved = config.prompt_and_save()
+        print(f"Guardadas en {saved.resolve()}\n")
 
     spotify = SpotifySource.from_env()
     ytmusic = YTMusicTarget.from_auth_file(args.auth, delay=args.delay)

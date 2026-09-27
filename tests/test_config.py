@@ -33,9 +33,23 @@ def test_env_file_does_not_override_existing_vars(clean_env, monkeypatch):
     assert os.environ["SPOTIPY_CLIENT_ID"] == "from_shell"
 
 
-def test_cli_explains_missing_credentials(clean_env, capsys):
+def test_cli_explains_missing_credentials_when_not_interactive(clean_env, capsys, monkeypatch):
     (clean_env / "browser.json").write_text("{}")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     code = cli.main(["convert", "liked"])
     assert code == 2
     err = capsys.readouterr().err
     assert "SPOTIPY_CLIENT_ID" in err and ".env" in err
+
+
+def test_utf16_env_file_from_notepad(clean_env):
+    (clean_env / ".env").write_text("SPOTIPY_CLIENT_ID=abc\nSPOTIPY_CLIENT_SECRET=xyz\n", encoding="utf-16")
+    config.load_env_file(clean_env)
+    assert config.missing_vars() == []
+
+
+def test_prompt_and_save_asks_and_writes_env(clean_env):
+    answers = iter(["", ' "abc" ', "xyz"])
+    path = config.prompt_and_save(clean_env, ask=lambda _: next(answers))
+    assert path.read_text() == "SPOTIPY_CLIENT_ID=abc\nSPOTIPY_CLIENT_SECRET=xyz\n"
+    assert config.missing_vars() == []

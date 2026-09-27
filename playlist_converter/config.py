@@ -18,8 +18,7 @@ def load_env_file(directory: Path = Path(".")) -> Path | None:
     for name in ENV_FILES:
         path = directory / name
         if path.is_file():
-            # utf-8-sig: el Bloc de notas a veces agrega un BOM al inicio.
-            for line in path.read_text(encoding="utf-8-sig").splitlines():
+            for line in _read_text(path).splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
@@ -34,3 +33,26 @@ def load_env_file(directory: Path = Path(".")) -> Path | None:
 
 def missing_vars() -> list[str]:
     return [name for name in REQUIRED_VARS if not os.environ.get(name)]
+
+
+def prompt_and_save(directory: Path = Path("."), ask=input) -> Path:
+    """Pide las credenciales que falten y las guarda en .env para la próxima vez."""
+    labels = {"SPOTIPY_CLIENT_ID": "Client ID", "SPOTIPY_CLIENT_SECRET": "Client Secret"}
+    for name in missing_vars():
+        value = ""
+        while not value:
+            value = ask(f"Pega tu {labels[name]} de Spotify: ").strip().strip('"').strip("'")
+        os.environ[name] = value
+    path = directory / ".env"
+    path.write_text(
+        "".join(f"{name}={os.environ[name]}\n" for name in REQUIRED_VARS), encoding="utf-8"
+    )
+    return path
+
+
+def _read_text(path: Path) -> str:
+    raw = path.read_bytes()
+    # El Bloc de notas puede guardar en UTF-16 ("Unicode") o con BOM UTF-8.
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    return raw.decode("utf-8-sig", errors="replace")
