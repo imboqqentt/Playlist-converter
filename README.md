@@ -31,17 +31,18 @@ pip install -r requirements.txt
 1. Entra a <https://developer.spotify.com/dashboard> y crea una app.
    - **Redirect URI**: `http://127.0.0.1:8888/callback` (Spotify ya no acepta `localhost`).
    - En "Which API/SDKs are you planning to use?" marca **Web API**.
-2. Copia el **Client ID** y el **Client Secret** y exporta las variables:
+2. Copia el **Client ID** y el **Client Secret** (en *Settings*) y crea un archivo
+   llamado `.env` en la carpeta del proyecto con estas dos líneas
+   (puedes copiar `.env.example`):
 
-   ```bash
-   # macOS / Linux
-   export SPOTIPY_CLIENT_ID="tu_client_id"
-   export SPOTIPY_CLIENT_SECRET="tu_client_secret"
-
-   # Windows (PowerShell)
-   $env:SPOTIPY_CLIENT_ID="tu_client_id"
-   $env:SPOTIPY_CLIENT_SECRET="tu_client_secret"
    ```
+   SPOTIPY_CLIENT_ID=tu_client_id
+   SPOTIPY_CLIENT_SECRET=tu_client_secret
+   ```
+
+   En Windows, si lo creas con el Bloc de notas y queda como `.env.txt`, también funciona.
+   Si prefieres variables de entorno, también sirven
+   (PowerShell: `$env:SPOTIPY_CLIENT_ID="..."`; macOS/Linux: `export SPOTIPY_CLIENT_ID=...`).
 
 La primera vez que conviertas algo se abrirá el navegador para que autorices
 la app. El token queda guardado en `.spotify_cache`.

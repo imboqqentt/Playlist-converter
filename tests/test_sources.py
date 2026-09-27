@@ -126,6 +126,13 @@ def test_add_videos_dedupes_and_batches():
     assert [len(batch) for _, batch in fake.added] == [50, 50, 20]
 
 
+@pytest.fixture(autouse=True)
+def spotify_credentials(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SPOTIPY_CLIENT_ID", "id")
+    monkeypatch.setenv("SPOTIPY_CLIENT_SECRET", "secret")
+
+
 def test_cli_convert_end_to_end(tmp_path, monkeypatch, capsys):
     auth = tmp_path / "browser.json"
     auth.write_text("{}")

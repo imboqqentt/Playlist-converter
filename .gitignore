@@ -4,6 +4,7 @@ oauth.json
 .spotify_cache
 .cache*
 .env
+.env.txt
 
 # Reportes generados
 reporte_*.csv

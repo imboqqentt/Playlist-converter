@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import report
+from . import config, report
 from .models import MatchResult, MatchStatus
 from .spotify_source import SpotifySource, parse_playlist_ref
 from .ytmusic_target import YTMusicTarget
@@ -104,6 +104,19 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print(
             f"No encuentro {args.auth}. Ejecuta primero:\n"
             "  python -m playlist_converter setup-ytmusic",
+            file=sys.stderr,
+        )
+        return 2
+
+    config.load_env_file()
+    missing = config.missing_vars()
+    if missing:
+        print(
+            f"Faltan tus credenciales de Spotify: {', '.join(missing)}.\n"
+            "Crea un archivo llamado .env en esta carpeta con estas dos líneas:\n"
+            "  SPOTIPY_CLIENT_ID=tu_client_id\n"
+            "  SPOTIPY_CLIENT_SECRET=tu_client_secret\n"
+            "(Los encuentras en https://developer.spotify.com/dashboard > tu app > Settings)",
             file=sys.stderr,
         )
         return 2
