@@ -1,7 +1,8 @@
 """Interfaz de línea de comandos.
 
 Uso:
-    python -m playlist_converter                      # menú interactivo
+    python -m playlist_converter                      # ventana (interfaz gráfica)
+    python -m playlist_converter menu                 # menú en la terminal
     python -m playlist_converter add-account NOMBRE
     python -m playlist_converter accounts
     python -m playlist_converter convert <playlist de Spotify | liked> [opciones]
@@ -15,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import accounts, config, report
+from .converter import ConvertOptions, convert
 from .models import MatchResult, MatchStatus
 from .spotify_source import SpotifySource, parse_playlist_ref
 from .ytmusic_target import YTMusicTarget
@@ -50,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--auth", help="Guardar en este archivo en vez de la carpeta de cuentas.")
 
     sub.add_parser("accounts", help="Muestra las cuentas de YouTube Music guardadas.")
+    sub.add_parser("menu", help="Menú guiado en la terminal.")
+    sub.add_parser("gui", help="Abre la ventana (lo mismo que ejecutar sin argumentos).")
+    sub.add_parser("selftest", help=argparse.SUPPRESS)
 
     remove = sub.add_parser("remove-account", help="Borra una cuenta guardada.")
     remove.add_argument("account")
@@ -167,50 +172,46 @@ def cmd_convert(args: argparse.Namespace) -> int:
     spotify = SpotifySource.from_env()
     ytmusic = YTMusicTarget.from_auth_file(str(auth_path), delay=args.delay)
 
-    name = args.name or spotify.playlist_name(playlist_id)
-    print(f"Leyendo '{name}' desde Spotify...")
-    tracks = list(spotify.tracks(playlist_id))
-    if args.limit:
-        tracks = tracks[: args.limit]
-    if not tracks:
+    width = 1
+
+    def on_start(name: str, total: int) -> None:
+        nonlocal width
+        width = len(str(total))
+
+    def on_result(i: int, total: int, result: MatchResult) -> None:
+        if result.status is MatchStatus.NOT_FOUND or not result.candidate:
+            found = "→ no encontrada"
+        else:
+            found = f"→ {result.candidate.title} ({result.score:.2f})"
+        print(f"[{i:>{width}}/{total}] {ICONS[result.status]} {result.track.display()} {found}")
+
+    options = ConvertOptions(
+        name=args.name,
+        privacy=args.privacy,
+        strict=args.strict,
+        dry_run=args.dry_run,
+        limit=args.limit,
+        append_to=args.append_to,
+    )
+    outcome = convert(spotify, ytmusic, playlist_id, options, on_start, on_result, on_status=print)
+    if not outcome.results:
         print("La playlist no tiene canciones.")
         return 0
 
-    results: list[MatchResult] = []
-    width = len(str(len(tracks)))
-    for i, track in enumerate(tracks, start=1):
-        result = ytmusic.find(track)
-        results.append(result)
-        found = f"→ {result.candidate.title} ({result.score:.2f})" if result.candidate else ""
-        if result.status is MatchStatus.NOT_FOUND:
-            found = "→ no encontrada"
-        print(f"[{i:>{width}}/{len(tracks)}] {ICONS[result.status]} {track.display()} {found}")
-
-    allowed = {MatchStatus.MATCHED} if args.strict else {MatchStatus.MATCHED, MatchStatus.LOW_CONFIDENCE}
-    video_ids = [r.candidate.video_id for r in results if r.status in allowed and r.candidate]
-
     report_path = args.report or Path(f"reporte_{datetime.now():%Y%m%d_%H%M%S}.csv")
-    report.write_csv(results, report_path)
+    report.write_csv(outcome.results, report_path)
 
     print()
-    print(report.summary(results))
+    print(report.summary(outcome.results))
     print(f"Reporte: {report_path}")
 
     if args.dry_run:
         print("Modo --dry-run: no se modificó YouTube Music.")
         return 0
-    if not video_ids:
+    if not outcome.playlist_id:
         print("No hay canciones para agregar.")
         return 1
-
-    if args.append_to:
-        target_id = args.append_to
-    else:
-        target_id = ytmusic.create_playlist(
-            name, description="Convertida desde Spotify con playlist-converter", privacy=args.privacy
-        )
-    ytmusic.add_videos(target_id, video_ids)
-    print(f"\n{len(set(video_ids))} canciones agregadas a https://music.youtube.com/playlist?list={target_id}")
+    print(f"\n{outcome.added} canciones agregadas a {outcome.playlist_url}")
     return 0
 
 
@@ -220,7 +221,31 @@ COMMANDS = {
     "accounts": cmd_accounts,
     "remove-account": cmd_remove_account,
     "convert": cmd_convert,
+    "menu": lambda args: run_menu(),
+    "gui": lambda args: open_gui(),
+    "selftest": lambda args: __import__("playlist_converter.gui", fromlist=["selftest"]).selftest(),
 }
+
+
+def run_menu() -> int:
+    from .interactive import run_menu as menu
+
+    return menu()
+
+
+def open_gui() -> int:
+    """Abre la ventana; si no se puede (sin Tkinter o sin pantalla), usa el menú de terminal."""
+    try:
+        from .gui import main as gui_main
+    except ImportError:
+        return run_menu()
+    try:
+        return gui_main()
+    except Exception as exc:  # p. ej. TclError: no display
+        if sys.stdin is None or not sys.stdin.isatty():
+            raise
+        print(f"No pude abrir la ventana ({exc}); uso el menú en la terminal.")
+        return run_menu()
 
 
 def enable_utf8_output() -> None:
@@ -237,9 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
-        from .interactive import run_menu
-
-        return run_menu()
+        return open_gui()
     args = build_parser().parse_args(argv)
     return COMMANDS[args.command](args)
 

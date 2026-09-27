@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Convierte playlists de Spotify en playlists de YouTube Music"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["spotipy>=2.25", "ytmusicapi>=1.10"]
+dependencies = ["spotipy>=2.25", "ytmusicapi>=1.10", "sv-ttk>=2.6"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -16,5 +16,11 @@ dev = ["pytest"]
 [project.scripts]
 playlist-converter = "playlist_converter.cli:main"
 
+[project.gui-scripts]
+playlist-converter-gui = "playlist_converter.gui:main"
+
 [tool.setuptools]
 packages = ["playlist_converter"]
+
+[tool.setuptools.package-data]
+playlist_converter = ["assets/*"]

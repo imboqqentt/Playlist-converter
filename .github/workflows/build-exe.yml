@@ -28,20 +28,25 @@ jobs:
 
       - name: Construir PlaylistConverter.exe
         run: >
-          pyinstaller --noconfirm --onefile --console
+          pyinstaller --noconfirm --onefile --windowed
           --name PlaylistConverter
+          --icon playlist_converter/assets/icon.ico
+          --add-data "playlist_converter/assets:playlist_converter/assets"
           --collect-data ytmusicapi --copy-metadata ytmusicapi
+          --collect-data sv_ttk
           launcher.py
 
       - name: Probar el .exe
         shell: pwsh
         env:
           PLAYLIST_CONVERTER_HOME: ${{ runner.temp }}\pc-home
+        # Es una app de ventana: hay que esperar a que termine para leer su código de salida.
         run: |
-          "4" | .\dist\PlaylistConverter.exe
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          .\dist\PlaylistConverter.exe accounts
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          foreach ($cmd in @("selftest", "accounts")) {
+            $p = Start-Process .\dist\PlaylistConverter.exe -ArgumentList $cmd -Wait -PassThru
+            Write-Host "$cmd -> $($p.ExitCode)"
+            if ($p.ExitCode -ne 0) { exit 1 }
+          }
 
       - uses: actions/upload-artifact@v4
         with:

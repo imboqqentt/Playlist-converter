@@ -42,23 +42,32 @@ def missing_vars() -> list[str]:
     return [name for name in REQUIRED_VARS if not os.environ.get(name)]
 
 
-def prompt_and_save(directory: Path | None = None, ask=input) -> Path:
-    """Pide las credenciales que falten y las guarda en .env para la próxima vez."""
+def save_credentials(client_id: str, client_secret: str, directory: Path | None = None) -> Path:
+    """Guarda las credenciales en .env (carpeta de datos) y las activa ahora mismo."""
     if directory is None:
         from .accounts import app_dir
 
         directory = app_dir()
+    os.environ["SPOTIPY_CLIENT_ID"] = client_id.strip()
+    os.environ["SPOTIPY_CLIENT_SECRET"] = client_secret.strip()
+    path = directory / ".env"
+    path.write_text(
+        "".join(f"{name}={os.environ[name]}\n" for name in REQUIRED_VARS), encoding="utf-8"
+    )
+    return path
+
+
+def prompt_and_save(directory: Path | None = None, ask=input) -> Path:
+    """Pide las credenciales que falten y las guarda en .env para la próxima vez."""
     labels = {"SPOTIPY_CLIENT_ID": "Client ID", "SPOTIPY_CLIENT_SECRET": "Client Secret"}
     for name in missing_vars():
         value = ""
         while not value:
             value = ask(f"Pega tu {labels[name]} de Spotify: ").strip().strip('"').strip("'")
         os.environ[name] = value
-    path = directory / ".env"
-    path.write_text(
-        "".join(f"{name}={os.environ[name]}\n" for name in REQUIRED_VARS), encoding="utf-8"
+    return save_credentials(
+        os.environ["SPOTIPY_CLIENT_ID"], os.environ["SPOTIPY_CLIENT_SECRET"], directory
     )
-    return path
 
 
 def _read_text(path: Path) -> str:

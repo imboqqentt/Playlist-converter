@@ -12,26 +12,25 @@ encontradas para que las revises a mano.
   descarta versiones en vivo, covers, karaoke, remixes, etc., salvo que la
   canción original también lo sea.
 
-## Opción fácil: el .exe para Windows (sin instalar Python)
+## Opción fácil: la aplicación para Windows (sin instalar Python)
 
 1. Ve a la pestaña **Releases** del repositorio y descarga `PlaylistConverter.exe`
    (o, desde **Actions** → la última ejecución verde → *Artifacts* → `PlaylistConverter-windows`).
 2. Haz doble clic. Si Windows muestra "Windows protegió su PC", haz clic en
    **Más información → Ejecutar de todas formas** (el .exe no está firmado digitalmente).
-3. Aparece un menú:
+3. Se abre una ventana con tres pasos:
+   1. **Playlist de Spotify**: pega el link (o marca "Usar mis canciones guardadas").
+   2. **Cuenta de YouTube Music**: elige la cuenta o agrega una nueva con **Agregar cuenta…**.
+   3. **Opciones**: nombre, privacidad, "Solo probar" y "No agregar coincidencias dudosas".
 
-   ```
-   === Playlist Converter: Spotify → YouTube Music ===
+   Presiona **Convertir** y verás cada canción aparecer en la tabla (✔ encontrada,
+   ? dudosa, ✘ no encontrada). Doble clic en una fila abre esa canción en YouTube Music.
+   Al terminar, **Abrir playlist** la abre en el navegador y **Guardar reporte…**
+   exporta el resultado a un CSV para Excel.
 
-   Cuentas de YouTube Music: daniel, mama
-     1. Convertir una playlist de Spotify
-     2. Agregar una cuenta de YouTube Music
-     3. Eliminar una cuenta
-     4. Salir
-   ```
-
-   La primera vez te pide el Client ID y el Client Secret de Spotify (ver abajo)
-   y los recuerda.
+La primera vez, la ventana te pide el Client ID y el Client Secret de Spotify
+(botón **Ajustes de Spotify…**, con instrucciones y un botón para copiar la Redirect URI).
+Se sigue el tema claro u oscuro de Windows.
 
 Las cuentas y credenciales se guardan en `%APPDATA%\PlaylistConverter`
 (en macOS/Linux: `~/.config/playlist-converter`).
@@ -118,8 +117,11 @@ Red). Pégalos y presiona Enter dos veces.
 ## Uso
 
 ```bash
-# Menú guiado (lo mismo que el .exe)
+# Ventana (lo mismo que el .exe)
 python -m playlist_converter
+
+# Menú guiado en la terminal
+python -m playlist_converter menu
 
 # Convertir una playlist (pega el link de "Compartir" de Spotify)
 python -m playlist_converter convert "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
@@ -196,7 +198,10 @@ Estructura:
 ```
 playlist_converter/
   cli.py             # comandos y opciones
-  interactive.py     # menú guiado (el que abre el .exe)
+  gui.py             # ventana (la que abre el .exe)
+  converter.py       # proceso de conversión, compartido por la ventana y la terminal
+  interactive.py     # menú guiado en la terminal
+  assets/            # ícono
   accounts.py        # cuentas de YouTube Music y carpeta de datos
   config.py          # credenciales de Spotify (.env)
   spotify_source.py  # lectura de Spotify
@@ -213,7 +218,7 @@ Para construir el .exe localmente en Windows:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --console --name PlaylistConverter --collect-data ytmusicapi --copy-metadata ytmusicapi launcher.py
+pyinstaller --onefile --windowed --name PlaylistConverter --icon playlist_converter/assets/icon.ico --add-data "playlist_converter/assets:playlist_converter/assets" --collect-data ytmusicapi --copy-metadata ytmusicapi --collect-data sv_ttk launcher.py
 ```
 
 ## Limitaciones
