@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "playlist-converter"
+version = "0.1.0"
+description = "Convierte playlists de Spotify en playlists de YouTube Music"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["spotipy>=2.25", "ytmusicapi>=1.10"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+playlist-converter = "playlist_converter.cli:main"
+
+[tool.setuptools]
+packages = ["playlist_converter"]

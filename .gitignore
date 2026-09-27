@@ -1,0 +1,15 @@
+# Credenciales: nunca subirlas
+browser.json
+oauth.json
+.spotify_cache
+.cache*
+.env
+
+# Reportes generados
+reporte_*.csv
+
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
