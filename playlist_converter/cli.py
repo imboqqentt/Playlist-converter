@@ -1,7 +1,9 @@
 """Interfaz de línea de comandos.
 
 Uso:
-    python -m playlist_converter setup-ytmusic
+    python -m playlist_converter                      # menú interactivo
+    python -m playlist_converter add-account NOMBRE
+    python -m playlist_converter accounts
     python -m playlist_converter convert <playlist de Spotify | liked> [opciones]
 """
 
@@ -12,12 +14,19 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import config, report
+from . import accounts, config, report
 from .models import MatchResult, MatchStatus
 from .spotify_source import SpotifySource, parse_playlist_ref
 from .ytmusic_target import YTMusicTarget
 
-DEFAULT_AUTH_FILE = "browser.json"
+HEADERS_HELP = (
+    "Cómo copiar la sesión de YouTube Music:\n"
+    "  1. En Firefox, abre https://music.youtube.com con la cuenta que quieres usar.\n"
+    "  2. Presiona F12 > pestaña Red (Network) y escribe 'browse' en el filtro.\n"
+    "  3. Haz clic en cualquier sección (por ejemplo, Biblioteca).\n"
+    "  4. Clic derecho en una petición POST 'browse' > Copiar > Copiar encabezados de la petición.\n"
+    "  5. Pégalos aquí (clic derecho en la ventana) y presiona Enter dos veces.\n"
+)
 ICONS = {
     MatchStatus.MATCHED: "✔",
     MatchStatus.LOW_CONFIDENCE: "?",
@@ -32,11 +41,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    setup = sub.add_parser(
-        "setup-ytmusic",
-        help="Guarda las credenciales de YouTube Music (se hace una sola vez).",
+    add = sub.add_parser(
+        "add-account",
+        aliases=["setup-ytmusic"],
+        help="Guarda la sesión de una cuenta de YouTube Music.",
     )
-    setup.add_argument("--auth", default=DEFAULT_AUTH_FILE, help="Archivo donde guardarlas.")
+    add.add_argument("account", nargs="?", default="principal", help="Nombre para la cuenta.")
+    add.add_argument("--auth", help="Guardar en este archivo en vez de la carpeta de cuentas.")
+
+    sub.add_parser("accounts", help="Muestra las cuentas de YouTube Music guardadas.")
+
+    remove = sub.add_parser("remove-account", help="Borra una cuenta guardada.")
+    remove.add_argument("account")
 
     convert = sub.add_parser("convert", help="Convierte una playlist.")
     convert.add_argument(
@@ -67,7 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     convert.add_argument("--limit", type=int, help="Procesar solo las primeras N canciones.")
     convert.add_argument("--report", type=Path, help="Ruta del reporte CSV.")
-    convert.add_argument("--auth", default=DEFAULT_AUTH_FILE, help="Credenciales de YouTube Music.")
+    convert.add_argument("--account", help="Cuenta de YouTube Music a usar (ver 'accounts').")
+    convert.add_argument("--auth", help="Archivo de sesión de YouTube Music (en vez de --account).")
     convert.add_argument(
         "--delay",
         type=float,
@@ -77,20 +94,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def cmd_setup(args: argparse.Namespace) -> int:
-    from ytmusicapi import setup
+def cmd_add_account(args: argparse.Namespace) -> int:
+    print(HEADERS_HELP)
+    headers = accounts.read_headers()
+    if not headers:
+        print("No pegaste nada; no se guardó la cuenta.", file=sys.stderr)
+        return 2
+    try:
+        if args.auth:
+            from ytmusicapi import setup
 
-    print(
-        "1. Abre https://music.youtube.com en tu navegador con tu cuenta iniciada.\n"
-        "2. Abre las herramientas de desarrollo (F12) > pestaña Red (Network).\n"
-        "3. Filtra por 'browse' y haz clic en alguna sección de YouTube Music.\n"
-        "4. Selecciona una petición POST a 'browse' y copia sus Request Headers.\n"
-        "   (En Firefox: clic derecho > Copiar > Copiar encabezados de la petición)\n"
-        "5. Pégalos abajo y termina con Enter + Ctrl-D (Ctrl-Z + Enter en Windows).\n"
-    )
-    setup(filepath=args.auth)
-    print(f"\nListo. Credenciales guardadas en {args.auth}. ¡No compartas ese archivo!")
+            setup(filepath=args.auth, headers_raw=headers)
+            path = Path(args.auth)
+        else:
+            path = accounts.save_account(args.account, headers)
+    except Exception as exc:  # ytmusicapi lanza errores genéricos si faltan cookies
+        print(f"No pude leer esos encabezados: {exc}", file=sys.stderr)
+        return 2
+    print(f"\nListo. Cuenta guardada en {path}. ¡No compartas ese archivo!")
     return 0
+
+
+def cmd_accounts(args: argparse.Namespace) -> int:
+    names = accounts.list_accounts()
+    if not names:
+        print("No hay cuentas guardadas. Agrega una con: add-account NOMBRE")
+    for name in names:
+        print(f"- {name}")
+    print(f"\n(Carpeta: {accounts.accounts_dir()})")
+    return 0
+
+
+def cmd_remove_account(args: argparse.Namespace) -> int:
+    if accounts.remove_account(args.account):
+        print(f"Cuenta '{args.account}' eliminada.")
+        return 0
+    print(f"No existe la cuenta '{args.account}'.", file=sys.stderr)
+    return 2
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
@@ -100,20 +140,18 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    if not Path(args.auth).exists():
-        print(
-            f"No encuentro {args.auth}. Ejecuta primero:\n"
-            "  python -m playlist_converter setup-ytmusic",
-            file=sys.stderr,
-        )
+    try:
+        auth_path = accounts.resolve_auth(args.account, args.auth)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
         return 2
 
-    config.load_env_file()
+    config.load_env()
     if config.missing_vars():
         if not sys.stdin.isatty():
             print(
                 f"Faltan tus credenciales de Spotify: {', '.join(config.missing_vars())}.\n"
-                f"Crea un archivo .env en {Path.cwd()} con estas dos líneas:\n"
+                f"Crea un archivo .env en {accounts.app_dir()} con estas dos líneas:\n"
                 "  SPOTIPY_CLIENT_ID=tu_client_id\n"
                 "  SPOTIPY_CLIENT_SECRET=tu_client_secret",
                 file=sys.stderr,
@@ -127,7 +165,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print(f"Guardadas en {saved.resolve()}\n")
 
     spotify = SpotifySource.from_env()
-    ytmusic = YTMusicTarget.from_auth_file(args.auth, delay=args.delay)
+    ytmusic = YTMusicTarget.from_auth_file(str(auth_path), delay=args.delay)
 
     name = args.name or spotify.playlist_name(playlist_id)
     print(f"Leyendo '{name}' desde Spotify...")
@@ -176,11 +214,34 @@ def cmd_convert(args: argparse.Namespace) -> int:
     return 0
 
 
+COMMANDS = {
+    "add-account": cmd_add_account,
+    "setup-ytmusic": cmd_add_account,
+    "accounts": cmd_accounts,
+    "remove-account": cmd_remove_account,
+    "convert": cmd_convert,
+}
+
+
+def enable_utf8_output() -> None:
+    # En Windows, si la salida se redirige, ✔/✘ y los acentos pueden causar errores.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    enable_utf8_output()
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        from .interactive import run_menu
+
+        return run_menu()
     args = build_parser().parse_args(argv)
-    if args.command == "setup-ytmusic":
-        return cmd_setup(args)
-    return cmd_convert(args)
+    return COMMANDS[args.command](args)
 
 
 if __name__ == "__main__":

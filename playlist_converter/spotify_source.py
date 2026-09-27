@@ -58,10 +58,14 @@ class SpotifySource:
         self.client = client
 
     @classmethod
-    def from_env(cls, cache_path: str = ".spotify_cache") -> "SpotifySource":
+    def from_env(cls, cache_path: str | None = None) -> "SpotifySource":
         """Crea el cliente usando SPOTIPY_CLIENT_ID / SPOTIPY_CLIENT_SECRET."""
         import os
 
+        from .accounts import app_dir
+
+        if cache_path is None:
+            cache_path = str(app_dir() / ".spotify_cache")
         import spotipy
         from spotipy.oauth2 import SpotifyOAuth
 

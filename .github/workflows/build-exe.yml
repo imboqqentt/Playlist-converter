@@ -1,0 +1,55 @@
+name: Construir .exe para Windows
+
+on:
+  push:
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt pyinstaller pytest
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Construir PlaylistConverter.exe
+        run: >
+          pyinstaller --noconfirm --onefile --console
+          --name PlaylistConverter
+          --collect-data ytmusicapi --copy-metadata ytmusicapi
+          launcher.py
+
+      - name: Probar el .exe
+        shell: pwsh
+        env:
+          PLAYLIST_CONVERTER_HOME: ${{ runner.temp }}\pc-home
+        run: |
+          "4" | .\dist\PlaylistConverter.exe
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          .\dist\PlaylistConverter.exe accounts
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlaylistConverter-windows
+          path: dist/PlaylistConverter.exe
+
+      - name: Adjuntar a la release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/PlaylistConverter.exe --clobber

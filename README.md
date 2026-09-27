@@ -12,7 +12,57 @@ encontradas para que las revises a mano.
   descarta versiones en vivo, covers, karaoke, remixes, etc., salvo que la
   canción original también lo sea.
 
-## Instalación
+## Opción fácil: el .exe para Windows (sin instalar Python)
+
+1. Ve a la pestaña **Releases** del repositorio y descarga `PlaylistConverter.exe`
+   (o, desde **Actions** → la última ejecución verde → *Artifacts* → `PlaylistConverter-windows`).
+2. Haz doble clic. Si Windows muestra "Windows protegió su PC", haz clic en
+   **Más información → Ejecutar de todas formas** (el .exe no está firmado digitalmente).
+3. Aparece un menú:
+
+   ```
+   === Playlist Converter: Spotify → YouTube Music ===
+
+   Cuentas de YouTube Music: daniel, mama
+     1. Convertir una playlist de Spotify
+     2. Agregar una cuenta de YouTube Music
+     3. Eliminar una cuenta
+     4. Salir
+   ```
+
+   La primera vez te pide el Client ID y el Client Secret de Spotify (ver abajo)
+   y los recuerda.
+
+Las cuentas y credenciales se guardan en `%APPDATA%\PlaylistConverter`
+(en macOS/Linux: `~/.config/playlist-converter`).
+
+### Publicar una versión nueva del .exe
+
+Cada push construye el .exe automáticamente (pestaña **Actions**). Para dejarlo
+en una descarga fija: **Releases → Draft a new release**, crea un tag (ej. `v1.0`)
+y publica. El .exe se adjunta solo a la release en un par de minutos.
+
+## Varias cuentas de YouTube Music
+
+Puedes guardar tantas cuentas como quieras y elegir en cuál crear cada playlist:
+
+```bash
+python -m playlist_converter add-account mama      # pide pegar la sesión de esa cuenta
+python -m playlist_converter accounts              # lista las cuentas guardadas
+python -m playlist_converter convert <playlist> --account mama
+python -m playlist_converter remove-account mama
+```
+
+Para agregar la cuenta de otra persona, esa persona debe iniciar sesión en
+music.youtube.com en el navegador (o una ventana privada) y copiar sus
+encabezados. Si solo hay una cuenta guardada, se usa automáticamente.
+
+**Spotify:** tu propio login de Spotify puede leer cualquier playlist **pública**
+de otra persona (basta con su link). Para que otra persona use su propio Spotify
+(por ejemplo, sus playlists privadas o sus favoritas), agrégala en tu app de Spotify
+en *User Management*, o que cree su propia app.
+
+## Instalación con Python
 
 Requiere Python 3.10 o más reciente.
 
@@ -31,9 +81,9 @@ pip install -r requirements.txt
 1. Entra a <https://developer.spotify.com/dashboard> y crea una app.
    - **Redirect URI**: `http://127.0.0.1:8888/callback` (Spotify ya no acepta `localhost`).
    - En "Which API/SDKs are you planning to use?" marca **Web API**.
-2. Copia el **Client ID** y el **Client Secret** (en *Settings*) y crea un archivo
-   llamado `.env` en la carpeta del proyecto con estas dos líneas
-   (puedes copiar `.env.example`):
+2. Copia el **Client ID** y el **Client Secret** (en *Settings*). El programa
+   te los pide la primera vez y los guarda. También puedes crear un archivo
+   `.env` en la carpeta del proyecto con estas dos líneas (ver `.env.example`):
 
    ```
    SPOTIPY_CLIENT_ID=tu_client_id
@@ -45,7 +95,7 @@ pip install -r requirements.txt
    (PowerShell: `$env:SPOTIPY_CLIENT_ID="..."`; macOS/Linux: `export SPOTIPY_CLIENT_ID=...`).
 
 La primera vez que conviertas algo se abrirá el navegador para que autorices
-la app. El token queda guardado en `.spotify_cache`.
+la app. El token queda guardado en la carpeta de datos del programa.
 
 > Las apps en "modo desarrollo" solo pueden usarlas las cuentas que agregues en
 > *User Management* dentro del dashboard. Spotify también puede exigir que el
@@ -54,20 +104,23 @@ la app. El token queda guardado en `.spotify_cache`.
 ### 2. YouTube Music
 
 ```bash
-python -m playlist_converter setup-ytmusic
+python -m playlist_converter add-account principal
 ```
 
 El comando te guía para copiar los encabezados (headers) de una petición de
 music.youtube.com desde las herramientas de desarrollo del navegador (F12 →
-Red) y los guarda en `browser.json`.
+Red). Pégalos y presiona Enter dos veces.
 
-> `browser.json` equivale a tu sesión de Google: **no lo compartas ni lo subas
-> a GitHub** (ya está en `.gitignore`). Dura unos dos años o hasta que cierres
-> sesión en ese navegador.
+> El archivo de cada cuenta equivale a esa sesión de Google: **no lo compartas**.
+> Dura hasta que se cierre sesión en ese navegador. Si deja de funcionar,
+> vuelve a agregar la cuenta con el mismo nombre.
 
 ## Uso
 
 ```bash
+# Menú guiado (lo mismo que el .exe)
+python -m playlist_converter
+
 # Convertir una playlist (pega el link de "Compartir" de Spotify)
 python -m playlist_converter convert "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
 
@@ -102,7 +155,8 @@ Reporte: reporte_20260927_153000.csv
 | `--append-to ID` | Agrega a una playlist existente de YouTube Music en vez de crear otra (las repetidas se omiten). |
 | `--limit N` | Procesa solo las primeras N canciones (útil para probar). |
 | `--report archivo.csv` | Dónde guardar el reporte. |
-| `--auth archivo.json` | Credenciales de YouTube Music (por defecto `browser.json`). |
+| `--account NOMBRE` | Cuenta de YouTube Music donde crear la playlist. |
+| `--auth archivo.json` | Usar un archivo de sesión específico en vez de una cuenta guardada. |
 | `--delay 0.5` | Espera entre búsquedas, por si YouTube Music te limita. |
 
 ### El reporte
@@ -142,12 +196,24 @@ Estructura:
 ```
 playlist_converter/
   cli.py             # comandos y opciones
+  interactive.py     # menú guiado (el que abre el .exe)
+  accounts.py        # cuentas de YouTube Music y carpeta de datos
+  config.py          # credenciales de Spotify (.env)
   spotify_source.py  # lectura de Spotify
   ytmusic_target.py  # búsqueda y creación de playlists en YouTube Music
   matcher.py         # puntaje de coincidencias (lógica pura, sin red)
   report.py          # reporte CSV
   models.py          # Track, Candidate, MatchResult
 tests/
+launcher.py          # punto de entrada del .exe
+.github/workflows/   # construye el .exe en Windows
+```
+
+Para construir el .exe localmente en Windows:
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --console --name PlaylistConverter --collect-data ytmusicapi --copy-metadata ytmusicapi launcher.py
 ```
 
 ## Limitaciones

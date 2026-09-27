@@ -10,6 +10,13 @@ ENV_FILES = (".env", ".env.txt")
 REQUIRED_VARS = ("SPOTIPY_CLIENT_ID", "SPOTIPY_CLIENT_SECRET")
 
 
+def load_env() -> Path | None:
+    """Busca .env en la carpeta actual y luego en la carpeta de datos del programa."""
+    from .accounts import app_dir
+
+    return load_env_file(Path(".")) or load_env_file(app_dir())
+
+
 def load_env_file(directory: Path = Path(".")) -> Path | None:
     """Carga variables KEY=VALUE del primer archivo .env que exista.
 
@@ -35,8 +42,12 @@ def missing_vars() -> list[str]:
     return [name for name in REQUIRED_VARS if not os.environ.get(name)]
 
 
-def prompt_and_save(directory: Path = Path("."), ask=input) -> Path:
+def prompt_and_save(directory: Path | None = None, ask=input) -> Path:
     """Pide las credenciales que falten y las guarda en .env para la próxima vez."""
+    if directory is None:
+        from .accounts import app_dir
+
+        directory = app_dir()
     labels = {"SPOTIPY_CLIENT_ID": "Client ID", "SPOTIPY_CLIENT_SECRET": "Client Secret"}
     for name in missing_vars():
         value = ""
